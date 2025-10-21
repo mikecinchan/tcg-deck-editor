@@ -1,0 +1,40 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper function to check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Helper function to check if user owns the resource
+    function isOwner(userId) {
+      return request.auth.uid == userId;
+    }
+
+    // Decks collection
+    match /decks/{deckId} {
+      // Users can read their own decks
+      allow read: if isAuthenticated() &&
+                     isOwner(resource.data.userId);
+
+      // Users can create decks with their own userId
+      allow create: if isAuthenticated() &&
+                       isOwner(request.resource.data.userId) &&
+                       request.resource.data.name is string &&
+                       request.resource.data.cards is list &&
+                       request.resource.data.cards.size() > 0 &&
+                       request.resource.data.createdAt is timestamp &&
+                       request.resource.data.updatedAt is timestamp;
+
+      // Users can update their own decks
+      allow update: if isAuthenticated() &&
+                       isOwner(resource.data.userId) &&
+                       request.resource.data.userId == resource.data.userId;
+
+      // Users can delete their own decks
+      allow delete: if isAuthenticated() &&
+                       isOwner(resource.data.userId);
+    }
+  }
+}
