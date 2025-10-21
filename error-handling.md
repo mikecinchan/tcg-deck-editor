@@ -141,6 +141,136 @@ To prevent similar issues in the future:
 
 ---
 
+## Issue #2: Deck Saving/Loading - Firebase Index Missing
+
+**Date**: 2025-10-21
+
+### Problem Description
+
+Decks could be saved successfully but could not be loaded from the database. The application would fail to retrieve saved decks for users.
+
+### Root Cause
+
+In `backend/src/services/deck.service.ts`, the `getUserDecks()` method uses a composite query with both a `where` clause and an `orderBy` clause:
+
+```typescript
+// Lines 12-16
+const snapshot = await db
+  .collection(DECKS_COLLECTION)
+  .where('userId', '==', userId)
+  .orderBy('updatedAt', 'desc')
+  .get();
+```
+
+**Why this caused issues:**
+1. Firebase requires a composite index for queries that combine `where` and `orderBy` clauses on different fields
+2. Without the index, Firebase throws an error when trying to execute the query
+3. The index needs to be explicitly created in Firebase console or via `firestore.indexes.json`
+4. The query was attempting to filter by `userId` AND sort by `updatedAt`, requiring an index on both fields
+
+### Solution
+
+**Step 1: Create Firebase Index**
+
+Created a composite index in Firebase for the `decks` collection with the following configuration:
+- Collection: `decks`
+- Fields indexed:
+  - `userId` (Ascending)
+  - `updatedAt` (Descending)
+
+This index was defined in `firestore.indexes.json` and deployed to Firebase.
+
+**Step 2: Enable orderBy Clause**
+
+The `orderBy` clause in `backend/src/services/deck.service.ts:15` was already enabled and correctly configured:
+
+```typescript
+.orderBy('updatedAt', 'desc')
+```
+
+This clause sorts decks by their last update time in descending order (newest first).
+
+**Step 3: Server Restart**
+
+After creating and enabling the Firebase index, the backend server was restarted to ensure the connection was fresh:
+
+```bash
+cd backend && npm run dev
+```
+
+### Impact
+
+- ✅ Decks can now be saved successfully
+- ✅ Saved decks load properly for users
+- ✅ Decks are displayed in order of most recently updated first
+- ✅ No Firebase index errors
+
+### Firebase Index Configuration
+
+The composite index enables efficient querying with the following structure:
+
+```json
+{
+  "collectionGroup": "decks",
+  "queryScope": "COLLECTION",
+  "fields": [
+    {
+      "fieldPath": "userId",
+      "order": "ASCENDING"
+    },
+    {
+      "fieldPath": "updatedAt",
+      "order": "DESCENDING"
+    }
+  ]
+}
+```
+
+### Testing
+
+Confirmed working in local environment:
+- Backend: http://localhost:5000
+- Frontend: http://localhost:3000
+
+Users can now:
+1. Create and save decks with 20 cards
+2. View their saved decks list
+3. Load individual deck details
+4. Update existing decks
+5. Delete decks
+6. Decks appear sorted by most recently updated
+
+### Prevention
+
+To prevent similar issues in the future:
+
+1. **Always create necessary Firebase indexes before deploying queries**
+   - Use `firestore.indexes.json` to define indexes in version control
+   - Deploy indexes using Firebase CLI: `firebase deploy --only firestore:indexes`
+
+2. **Firebase composite query requirements**
+   - Any query with `where` + `orderBy` on different fields needs an index
+   - Multiple `where` clauses on different fields need an index
+   - Firebase error messages include a direct link to create the required index
+
+3. **Test queries locally with Firebase emulator**
+   - Use Firebase emulator suite to catch index requirements during development
+   - The emulator will warn about missing indexes before production deployment
+
+4. **Document index requirements**
+   - Keep `firestore.indexes.json` up to date
+   - Comment complex queries explaining why specific indexes are needed
+
+### Related Files
+
+- `backend/src/services/deck.service.ts` - Deck CRUD operations with composite query
+- `firestore.indexes.json` - Firebase index definitions
+- `backend/src/types/index.ts` - Deck type definitions
+- `frontend/src/pages/DeckBuilder.tsx` - Deck creation interface
+- `frontend/src/pages/MyDecks.tsx` - Saved decks list display
+
+---
+
 ## Future Issues
 
 Document any new issues below this line...
