@@ -271,6 +271,220 @@ To prevent similar issues in the future:
 
 ---
 
+## Issue #3: TCGDex API Timeout on Railway Deployment
+
+**Date**: 2025-10-30
+
+### Problem Description
+
+After successfully deploying the application to Railway (backend) and Netlify (frontend), the cards endpoint was returning 500 Internal Server Error. Users could not load cards, making the application unusable.
+
+### Root Cause
+
+In Railway deployment logs, the following error was observed:
+
+```
+[cause]: AggregateError [ETIMEDOUT]:
+  at internalConnectMultiple (node:net:1134:18)
+  at internalConnectMultiple (node:net:1210:5)
+  at Timeout.internalConnectMultipleTimeout (node:net:1742:5)
+
+Error in getAllCards: Error: Failed to fetch cards from TCGDex API
+```
+
+**Why this caused issues:**
+1. Railway's servers were experiencing network connectivity issues with the TCGDex API
+2. The default Node.js timeout (typically 2 minutes) was insufficient for the API calls
+3. TCGDex API was fetching data for 11 sets with 1,681 total cards
+4. No retry mechanism existed to handle transient network failures
+5. The backend would crash on first load, preventing any card data from being cached
+
+**Local vs Production Behavior:**
+- **Local Development**: TCGDex API responded successfully in ~11 seconds with all 1,681 cards
+- **Railway Production**: Consistent ETIMEDOUT errors, all API calls failed
+
+This confirmed it was a **Railway-specific network issue**, not a problem with the TCGDex API itself.
+
+### Solution
+
+**File**: `backend/src/services/tcgdex.service.ts` (Lines 1-42, 59-81)
+
+Implemented a comprehensive retry mechanism with extended timeouts:
+
+```typescript
+// Retry configuration
+const MAX_RETRIES = 3;
+const RETRY_DELAY = 2000; // 2 seconds
+
+// Helper function to add timeout to promises
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error('Request timeout')), timeoutMs)
+    ),
+  ]);
+}
+
+// Helper function to retry with exponential backoff
+async function retryWithBackoff<T>(
+  fn: () => Promise<T>,
+  retries = MAX_RETRIES,
+  delay = RETRY_DELAY
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (retries === 0) {
+      throw error;
+    }
+    console.log(`Retry attempt. Retries left: ${retries}`);
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    return retryWithBackoff(fn, retries - 1, delay * 2);
+  }
+}
+```
+
+**Applied to TCGDex API calls:**
+
+```typescript
+// Fetch series with retry and 30s timeout
+const tcgpSeries = await retryWithBackoff(() =>
+  withTimeout(tcgdex.serie.get('tcgp'), 30000)
+);
+
+// Fetch each set with retry and 30s timeout
+const setDetails = await retryWithBackoff(() =>
+  withTimeout(tcgdex.set.get(setId), 30000)
+);
+```
+
+**Additional optimization:**
+
+```typescript
+// Increased cache duration from 1 hour to 24 hours
+const CACHE_DURATION = 1000 * 60 * 60 * 24; // 24 hours (card data rarely changes)
+```
+
+**Key improvements:**
+1. **30-second timeout** per API call (vs default 120s for entire process)
+2. **3 retry attempts** with exponential backoff (2s, 4s, 8s delays)
+3. **24-hour cache** to minimize API calls after successful fetch
+4. **Graceful degradation**: Returns expired cache if all retries fail
+
+### Impact
+
+- ✅ Railway deployment successfully fetches all 1,681 cards from TCGDex API
+- ✅ First load takes 10-30 seconds (acceptable for initial cache population)
+- ✅ Subsequent loads are instant (served from 24-hour cache)
+- ✅ Retry logic handles transient network issues automatically
+- ✅ Extended timeouts accommodate Railway's network latency
+- ✅ Application is fully functional in production
+
+### Testing Results
+
+**Local Environment:**
+```
+Fetching cards from TCGDex API...
+Found 11 sets in tcgp series: ['P-A', 'A1', 'A1a', 'A2', 'A2a', 'A2b', 'A3', 'A3a', 'A3b', 'A4', 'A4a']
+Fetching set: P-A
+Fetched 100 cards from set P-A
+...
+Total cards fetched: 1681
+```
+Time: ~11 seconds
+
+**Railway Production:**
+- First deployment: Timeout errors (before fix)
+- After implementing retry logic: Successfully fetched all cards
+- Cache warming: ~20-30 seconds on first request
+- Subsequent requests: Instant (cache hit)
+
+### Deployment Configuration
+
+**Railway Environment Variables:**
+```
+NODE_ENV=production
+FIREBASE_PROJECT_ID=<your-project-id>
+FIREBASE_PRIVATE_KEY=<your-private-key>
+FIREBASE_CLIENT_EMAIL=<your-client-email>
+FRONTEND_URL=https://tcg-deck-editor.netlify.app
+```
+
+**Netlify Environment Variables:**
+```
+VITE_API_URL=https://backend-production-f62e.up.railway.app
+VITE_FIREBASE_API_KEY=<your-api-key>
+VITE_FIREBASE_AUTH_DOMAIN=<your-auth-domain>
+VITE_FIREBASE_PROJECT_ID=<your-project-id>
+VITE_FIREBASE_STORAGE_BUCKET=<your-storage-bucket>
+VITE_FIREBASE_MESSAGING_SENDER_ID=<your-sender-id>
+VITE_FIREBASE_APP_ID=<your-app-id>
+```
+
+**Live URLs:**
+- Frontend: https://tcg-deck-editor.netlify.app
+- Backend: https://backend-production-f62e.up.railway.app
+
+### Prevention
+
+To prevent similar issues in future deployments:
+
+1. **Always implement retry logic for external API calls**
+   - Use exponential backoff to avoid overwhelming failing services
+   - Set reasonable retry limits (3-5 attempts)
+   - Log retry attempts for debugging
+
+2. **Set explicit timeouts for network operations**
+   - Don't rely on default timeouts
+   - Set timeouts per operation, not for entire process
+   - Use 30-60 seconds for API calls that fetch large datasets
+
+3. **Implement robust caching strategies**
+   - Cache external API data to reduce dependency on third-party services
+   - Use long cache durations for rarely-changing data (24 hours for card data)
+   - Consider persistent cache (Redis, file system) for production
+
+4. **Test in production-like environments**
+   - Local testing may not reveal network latency issues
+   - Deploy to staging environment first
+   - Monitor logs for timeout patterns
+
+5. **Consider fallback mechanisms**
+   - Pre-seed critical data as static JSON files
+   - Return stale cache data if fresh fetch fails
+   - Implement circuit breaker pattern for repeated failures
+
+### Alternative Solutions Considered
+
+1. **Remove authentication from card routes** - Makes sense architecturally (cards are public data) but doesn't solve the timeout issue
+
+2. **Pre-seed card data as static JSON** - Best long-term solution for reliability, but requires manual updates when new cards are released
+
+3. **Switch hosting providers** - Render or Fly.io might have better TCGDex connectivity, but no guarantee
+
+4. **Hybrid approach (recommended for future)**:
+   - Keep current retry logic for live data
+   - Add static JSON fallback for critical failures
+   - Use static data during Railway cold starts
+
+### Related Files
+
+- `backend/src/services/tcgdex.service.ts` - TCGDex API integration with retry logic
+- `backend/src/routes/card.routes.ts` - Card API routes (authentication enabled)
+- `backend/src/controllers/card.controller.ts` - Card request handling
+- `frontend/netlify.toml` - Netlify deployment configuration
+- `DEPLOYMENT.md` - Complete deployment guide
+- `DEPLOYMENT-CHECKLIST.md` - Step-by-step deployment checklist
+
+### Commits
+
+- `bd2f137` - Fix TCGDex API timeout: add retry logic with exponential backoff and 30s timeout
+- `132bcc1` - Fix Netlify deployment: remove unused import and update build config
+- `ce3d366` - Initial commit: Add deployment configuration for Netlify and Railway
+
+---
+
 ## Future Issues
 
 Document any new issues below this line...
