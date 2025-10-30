@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { cardApi, deckApi } from '../services/api';
 import { Card, DeckCard } from '../types';
-import { Search, Save, X, Plus, Minus } from 'lucide-react';
+import { Search, Save, Plus, Minus } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 const MAX_DECK_SIZE = 20;
