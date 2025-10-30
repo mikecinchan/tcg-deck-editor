@@ -7,7 +7,39 @@ const tcgdex = new TCGdex('en');
 // Cache for cards to reduce API calls
 let cardsCache: Card[] | null = null;
 let cacheTimestamp: number = 0;
-const CACHE_DURATION = 1000 * 60 * 60; // 1 hour
+const CACHE_DURATION = 1000 * 60 * 60 * 24; // 24 hours (card data rarely changes)
+
+// Retry configuration
+const MAX_RETRIES = 3;
+const RETRY_DELAY = 2000; // 2 seconds
+
+// Helper function to add timeout to promises
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error('Request timeout')), timeoutMs)
+    ),
+  ]);
+}
+
+// Helper function to retry with exponential backoff
+async function retryWithBackoff<T>(
+  fn: () => Promise<T>,
+  retries = MAX_RETRIES,
+  delay = RETRY_DELAY
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (retries === 0) {
+      throw error;
+    }
+    console.log(`Retry attempt. Retries left: ${retries}`);
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    return retryWithBackoff(fn, retries - 1, delay * 2);
+  }
+}
 
 export class TCGDexService {
   /**
@@ -24,8 +56,10 @@ export class TCGDexService {
 
       console.log('Fetching cards from TCGDex API...');
 
-      // Fetch the 'tcgp' series (Pokemon TCG Pocket)
-      const tcgpSeries = await tcgdex.serie.get('tcgp');
+      // Fetch the 'tcgp' series (Pokemon TCG Pocket) with retry and timeout
+      const tcgpSeries = await retryWithBackoff(() =>
+        withTimeout(tcgdex.serie.get('tcgp'), 30000) // 30 second timeout
+      );
 
       if (!tcgpSeries || !tcgpSeries.sets || tcgpSeries.sets.length === 0) {
         console.log('No sets found for tcgp series');
@@ -39,10 +73,12 @@ export class TCGDexService {
 
       for (const setResume of tcgpSeries.sets) {
         try {
-          // Get the full set details including cards
+          // Get the full set details including cards with retry and timeout
           const setId = setResume.id || setResume.name;
           console.log(`Fetching set: ${setId}`);
-          const setDetails = await tcgdex.set.get(setId);
+          const setDetails = await retryWithBackoff(() =>
+            withTimeout(tcgdex.set.get(setId), 30000) // 30 second timeout per set
+          );
 
           if (setDetails && setDetails.cards) {
             console.log(`Fetched ${setDetails.cards.length} cards from set ${setId}`);
