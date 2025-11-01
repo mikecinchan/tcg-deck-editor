@@ -485,6 +485,239 @@ To prevent similar issues in future deployments:
 
 ---
 
+## Issue #4: TCGDex API Card Resumes Missing Type Information
+
+**Date**: 2025-11-01
+
+### Problem Description
+
+When implementing energy type filtering for the Cards and Deck Builder pages, we discovered that card type information (Grass, Fire, Water, etc.) was not available in the card data. Users could not filter cards by energy type because the `types` field was always `undefined`.
+
+### Root Cause
+
+The TCGDex API for Pokemon TCG Pocket returns two different levels of card data:
+
+**Card Resume** (from `setDetails.cards`):
+- Only includes basic fields: `id`, `image`, `localId`, `name`, `sdk`
+- **DOES NOT include**: `types`, `category`, `hp`, `rarity`, `stage`, etc.
+
+**Full Card Details** (from `tcgdex.card.get(cardId)`):
+- Includes complete card data: `types`, `category`, `hp`, `rarity`, `stage`, `attacks`, etc.
+
+```typescript
+// Card Resume - Limited data
+{
+  sdk: {...},
+  id: 'A1-001',
+  image: 'https://...',
+  localId: 'A1-001',
+  name: 'Bulbasaur'
+}
+
+// Full Card - Complete data
+{
+  ...
+  types: ['Grass'],      // ✅ Available
+  category: 'Pokemon',   // ✅ Available
+  hp: 70,               // ✅ Available
+  ...
+}
+```
+
+Our initial implementation in `backend/src/services/tcgdex.service.ts:86-110` only used the resume data from `setDetails.cards`, which is why `types` was always `undefined`.
+
+### Solution
+
+**File**: `backend/src/services/tcgdex.service.ts` (Lines 86-115)
+
+Implemented batched fetching of full card details for all cards:
+
+```typescript
+// Fetch full card details in batches to get types
+const BATCH_SIZE = 10; // Concurrent requests
+const cardResumes = setDetails.cards;
+const fullCards: any[] = [];
+
+console.log(`Fetching full details for ${cardResumes.length} cards in batches of ${BATCH_SIZE}...`);
+
+for (let i = 0; i < cardResumes.length; i += BATCH_SIZE) {
+  const batch = cardResumes.slice(i, i + BATCH_SIZE);
+  const batchPromises = batch.map((cardResume: any) =>
+    retryWithBackoff(() =>
+      withTimeout(tcgdex.card.get(cardResume.id), 30000)
+    ).catch((error) => {
+      console.error(`Failed to fetch card ${cardResume.id}:`, error.message);
+      return null; // Continue even if one card fails
+    })
+  );
+
+  const batchResults = await Promise.all(batchPromises);
+  fullCards.push(...batchResults.filter(c => c !== null));
+
+  // Log progress every 50 cards
+  if ((i + BATCH_SIZE) % 50 === 0 || (i + BATCH_SIZE) >= cardResumes.length) {
+    console.log(`Progress: ${Math.min(i + BATCH_SIZE, cardResumes.length)}/${cardResumes.length} cards fetched from set ${setId}`);
+  }
+}
+```
+
+**Key improvements:**
+1. **Batched fetching**: Process 10 cards concurrently to balance speed vs API load
+2. **Error handling**: Individual card failures don't stop the entire process
+3. **Progress logging**: Real-time updates every 50 cards for transparency
+4. **Retry logic**: Leverages existing retry mechanism with exponential backoff
+5. **Timeout protection**: 30-second timeout per card request
+
+### Frontend Implementation
+
+**Files**:
+- `frontend/src/pages/DeckBuilder.tsx` (Lines 19, 24, 33-50, 79-85, 187-210)
+- `frontend/src/pages/Cards.tsx` (Already had type filtering implemented)
+
+Added energy type filtering to Deck Builder:
+
+```typescript
+// State management
+const [typeFilter, setTypeFilter] = useState<string[]>([]);
+const availableTypes = Array.from(new Set(cards.flatMap(card => card.types || [])));
+
+// Filtering logic
+useEffect(() => {
+  let result = [...cards];
+
+  // Search filter
+  if (searchQuery) {
+    const query = searchQuery.toLowerCase();
+    result = result.filter(card => card.name.toLowerCase().includes(query));
+  }
+
+  // Type filter
+  if (typeFilter.length > 0) {
+    result = result.filter(card =>
+      card.types?.some(type => typeFilter.includes(type))
+    );
+  }
+
+  setFilteredCards(result);
+}, [searchQuery, typeFilter, cards]);
+
+// UI with clickable type buttons
+<div className="flex flex-wrap gap-2">
+  {availableTypes.map(type => (
+    <button
+      key={type}
+      onClick={() => toggleTypeFilter(type)}
+      className={typeFilter.includes(type) ? 'bg-primary-600 text-white' : 'bg-gray-200'}
+    >
+      {type}
+    </button>
+  ))}
+</div>
+```
+
+### Impact
+
+- ✅ Energy type filtering now works on both Cards and Deck Builder pages
+- ✅ Users can filter by: Grass, Fire, Water, Lightning, Psychic, Fighting, Darkness, Metal, Fairy, Dragon, Colorless
+- ✅ Multi-select support (multiple types can be selected simultaneously)
+- ✅ Filters work alongside existing search, rarity, and set filters
+- ⚠️ **First Load**: Takes 5-10 minutes to fetch full details for all 2,012 cards
+- ✅ **Subsequent Loads**: Instant (24-hour cache)
+
+### Performance Metrics
+
+**Initial card fetch (cold start):**
+- Total cards: 2,012 across 12 sets
+- Batch size: 10 concurrent requests
+- Timeout per card: 30 seconds
+- Retries: Up to 3 attempts with exponential backoff
+- Estimated time: 5-10 minutes
+
+**Example progress log:**
+```
+Fetching set: A1
+Fetched 286 cards from set A1
+Fetching full details for 286 cards in batches of 10...
+Progress: 50/286 cards fetched from set A1
+Progress: 100/286 cards fetched from set A1
+Progress: 150/286 cards fetched from set A1
+...
+Successfully fetched 286/286 full card details for set A1
+```
+
+**Cached loads:**
+- Time: ~0-1 seconds
+- Cache duration: 24 hours (configurable in `CACHE_DURATION`)
+
+### Prevention
+
+To prevent similar issues in future API integrations:
+
+1. **Always verify data completeness in API responses**
+   - Check what fields are actually available in resume vs full details
+   - Don't assume all fields exist in all response types
+   - Test with actual API calls, not just documentation
+
+2. **Log API response structures during development**
+   - Use `console.log(Object.keys(response))` to see available fields
+   - Log sample data for the first item to understand structure
+   - Document any differences between summary and detail endpoints
+
+3. **Consider performance implications of batched fetching**
+   - Balance concurrent requests vs API rate limits
+   - Implement progress logging for long-running operations
+   - Use exponential backoff for retries
+   - Set reasonable timeouts per request
+
+4. **Implement robust caching strategies**
+   - Cache expensive API operations (like 2,012 individual card fetches)
+   - Use long cache durations for rarely-changing data
+   - Consider persistent caching (Redis, file system) for production
+   - Log cache hits/misses for monitoring
+
+5. **Provide user feedback for long operations**
+   - Show loading states during initial fetch
+   - Display progress in console logs
+   - Document expected load times in README/user guides
+   - Consider background/async loading strategies
+
+### Alternative Solutions Considered
+
+1. **Use TCGDex REST API directly** - Might have different endpoint structure, but would still require individual card fetches
+
+2. **Pre-seed card data as static JSON** - Best long-term solution:
+   - Generate static JSON file with full card data
+   - Update periodically when new sets are released
+   - Instant loads, no API dependency during runtime
+   - Trade-off: Manual updates required for new cards
+
+3. **Lazy-load type data on demand** - Fetch full card details only when filtering by type:
+   - Faster initial load
+   - Slower first-time filtering
+   - Complex state management
+   - Decided against due to poor UX
+
+4. **Implement incremental loading** - Show cards as they're fetched:
+   - Better perceived performance
+   - More complex implementation
+   - May revisit in future if needed
+
+### Related Files
+
+- `backend/src/services/tcgdex.service.ts` - TCGDex API integration with batched full card fetching
+- `frontend/src/pages/DeckBuilder.tsx` - Deck builder with energy type filtering
+- `frontend/src/pages/Cards.tsx` - Card browser with energy type filtering (already implemented)
+- `frontend/src/types/index.ts` - Card type definitions
+- `README.md` - Updated with filtering documentation and performance notes
+
+### Commits
+
+- Added energy type filtering to Deck Builder
+- Implemented batched full card fetching for type data
+- Updated documentation for first load performance
+
+---
+
 ## Future Issues
 
 Document any new issues below this line...

@@ -16,10 +16,12 @@ export const DeckBuilder = () => {
   const [deckName, setDeckName] = useState('');
   const [deckNotes, setDeckNotes] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
+  const [typeFilter, setTypeFilter] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
   const totalCards = Array.from(deckCards.values()).reduce((sum, dc) => sum + dc.count, 0);
+  const availableTypes = Array.from(new Set(cards.flatMap(card => card.types || [])));
 
   useEffect(() => {
     fetchCards();
@@ -29,13 +31,23 @@ export const DeckBuilder = () => {
   }, [id]);
 
   useEffect(() => {
+    let result = [...cards];
+
+    // Search filter
     if (searchQuery) {
       const query = searchQuery.toLowerCase();
-      setFilteredCards(cards.filter(card => card.name.toLowerCase().includes(query)));
-    } else {
-      setFilteredCards(cards);
+      result = result.filter(card => card.name.toLowerCase().includes(query));
     }
-  }, [searchQuery, cards]);
+
+    // Type filter
+    if (typeFilter.length > 0) {
+      result = result.filter(card =>
+        card.types?.some(type => typeFilter.includes(type))
+      );
+    }
+
+    setFilteredCards(result);
+  }, [searchQuery, typeFilter, cards]);
 
   const fetchCards = async () => {
     try {
@@ -62,6 +74,14 @@ export const DeckBuilder = () => {
       console.error(error);
       toast.error('Failed to load deck');
     }
+  };
+
+  const toggleTypeFilter = (type: string) => {
+    setTypeFilter(prev =>
+      prev.includes(type)
+        ? prev.filter(t => t !== type)
+        : [...prev, type]
+    );
   };
 
   const addCard = (cardId: string) => {
@@ -163,6 +183,31 @@ export const DeckBuilder = () => {
                 />
               </div>
             </div>
+
+            {/* Type Filter */}
+            {availableTypes.length > 0 && (
+              <div className="mb-4">
+                <h3 className="font-semibold text-gray-700 mb-2 text-sm">Filter by Type</h3>
+                <div className="flex flex-wrap gap-2">
+                  {availableTypes.map(type => (
+                    <button
+                      key={type}
+                      onClick={() => toggleTypeFilter(type)}
+                      className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+                        typeFilter.includes(type)
+                          ? 'bg-primary-600 text-white'
+                          : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                      }`}
+                    >
+                      {type}
+                    </button>
+                  ))}
+                </div>
+                <div className="mt-2 text-xs text-gray-600">
+                  Showing {filteredCards.length} of {cards.length} cards
+                </div>
+              </div>
+            )}
 
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 max-h-[600px] overflow-y-auto">
               {filteredCards.map(card => {

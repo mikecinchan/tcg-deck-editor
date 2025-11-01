@@ -83,8 +83,39 @@ export class TCGDexService {
           if (setDetails && setDetails.cards) {
             console.log(`Fetched ${setDetails.cards.length} cards from set ${setId}`);
 
-            // Transform cards to our format (cards data is already included in setDetails)
-            const cards = setDetails.cards.map((card: any, index: number) => {
+            // Fetch full card details in batches to get types
+            // The resume objects don't include types, category, hp, etc.
+            // We need to fetch each card individually
+            const BATCH_SIZE = 10; // Concurrent requests
+            const cardResumes = setDetails.cards;
+            const fullCards: any[] = [];
+
+            console.log(`Fetching full details for ${cardResumes.length} cards in batches of ${BATCH_SIZE}...`);
+
+            for (let i = 0; i < cardResumes.length; i += BATCH_SIZE) {
+              const batch = cardResumes.slice(i, i + BATCH_SIZE);
+              const batchPromises = batch.map((cardResume: any) =>
+                retryWithBackoff(() =>
+                  withTimeout(tcgdex.card.get(cardResume.id), 30000)
+                ).catch((error) => {
+                  console.error(`Failed to fetch card ${cardResume.id}:`, error.message);
+                  return null; // Continue even if one card fails
+                })
+              );
+
+              const batchResults = await Promise.all(batchPromises);
+              fullCards.push(...batchResults.filter(c => c !== null));
+
+              // Log progress every 50 cards
+              if ((i + BATCH_SIZE) % 50 === 0 || (i + BATCH_SIZE) >= cardResumes.length) {
+                console.log(`Progress: ${Math.min(i + BATCH_SIZE, cardResumes.length)}/${cardResumes.length} cards fetched from set ${setId}`);
+              }
+            }
+
+            console.log(`Successfully fetched ${fullCards.length}/${cardResumes.length} full card details for set ${setId}`);
+
+            // Transform cards to our format
+            const cards = fullCards.map((card: any, index: number) => {
               // Extract card number from localId (e.g., "A1-001" -> "001")
               const cardNumber = card.localId ? card.localId.split('-')[1] : card.id;
 
@@ -113,10 +144,6 @@ export class TCGDexService {
                 imageUrl = `https://assets.tcgdex.net/en/tcgp/${setId}/${cardNumber}/high.webp`;
               }
 
-              // Log first card's image URL for debugging
-              if (index === 0) {
-                console.log(`Sample image URL for ${card.name} (${card.localId}): ${imageUrl}`);
-              }
 
               // Only include serializable properties (avoid circular references from TCGdex SDK)
               const cardData: any = {

@@ -5,10 +5,14 @@ A full-stack web application for building and managing Pokemon TCG Pocket decks.
 ## Features
 
 - **User Authentication**: Secure login/signup using Firebase Authentication
-- **Card Browser**: Browse all Pokemon TCG Pocket cards with filtering options
+- **Card Browser**: Browse all Pokemon TCG Pocket cards with advanced filtering
   - Search by card name
-  - Filter by type, rarity, and set
+  - Filter by energy type (Grass, Fire, Water, Lightning, Psychic, Fighting, etc.)
+  - Filter by rarity and set
+  - Multi-select filters work together
 - **Deck Builder**: Create and edit decks with 20-card limit validation
+  - Energy type filtering available in deck builder
+  - Real-time card filtering while building decks
 - **Deck Management**: Save, view, edit, and delete decks
 - **Notes System**: Add notes to each deck for strategy planning
 - **Responsive Design**: Works seamlessly on desktop, tablet, and mobile devices
@@ -238,9 +242,13 @@ Authorization: Bearer <firebase_id_token>
 ### Card Filtering
 
 - **Search**: Type-ahead search by card name
-- **Type Filter**: Filter by Pokemon type (Fire, Water, Grass, etc.)
+- **Energy Type Filter**: Filter by Pokemon energy type (Grass, Fire, Water, Lightning, Psychic, Fighting, Darkness, Metal, Fairy, Dragon, Colorless)
+  - Click type buttons to select/deselect
+  - Multiple types can be selected simultaneously
+  - Cards matching ANY selected type will be shown
 - **Rarity Filter**: Filter by card rarity
 - **Set Filter**: Filter by card set/collection
+- **Combined Filtering**: All filters work together for precise card discovery
 
 ### Deck Statistics
 
@@ -254,8 +262,16 @@ Authorization: Bearer <firebase_id_token>
 ### Cards not loading
 
 - Check that the TCGDex API is accessible
-- Backend caches cards for 1 hour - restart if needed
+- Backend caches cards for 24 hours - restart if needed
 - Check backend logs for API errors
+
+### First load is slow
+
+- **First Load**: The initial card fetch takes 5-10 minutes as the backend retrieves full details for all 2,012 cards to get energy type information
+- **Subsequent Loads**: Instant - cards are cached for 24 hours
+- **Why**: TCGDex API requires individual card fetches to get type data (not included in set summaries)
+- **Optimization**: Cards are fetched in batches of 10 concurrent requests with retry logic
+- **Progress**: Check backend console logs for real-time progress updates
 
 ### Authentication errors
 
